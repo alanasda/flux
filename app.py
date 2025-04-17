@@ -7,6 +7,7 @@ import random
 import string
 import jwt
 import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 CORS(app)
@@ -25,7 +26,7 @@ EMAIL_SENHA_APP = "ufvz jkdc ihpu ksak"
 
 # Função para criar um token JWT
 def create_token(email):
-    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)  # Token expira em 1 hora
+    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     token = jwt.encode({'email': email, 'exp': expiration}, SECRET_KEY, algorithm='HS256')
     return token
 
@@ -35,9 +36,12 @@ def verify_token(token):
         decoded_token = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
         return decoded_token['email']
     except jwt.ExpiredSignatureError:
-        return None  # Token expirado
+        return None
     except jwt.InvalidTokenError:
-        return None  # Token inválido
+        return None
+
+def gerar_senha_6_digitos():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
 
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -49,38 +53,33 @@ def register():
     data = request.get_json()
     nome = data.get("nome")
     email = data.get("email")
-    
+
     if not nome or not email:
         return jsonify({"success": False, "message": "Nome e e-mail são obrigatórios."}), 400
 
-    # Verifica se o e-mail já está registrado no Supabase
     result = supabase.table("usuarios").select("*").eq("email", email).execute()
     if not result.data:
         return jsonify({"success": False, "message": "E-mail não registrado."}), 404
 
-    # Atualiza o nome do usuário
     supabase.table("usuarios").update({"nome": nome}).eq("email", email).execute()
-
     return jsonify({"success": True, "message": "Registro concluído com sucesso!"}), 200
 
-# LOGIN
+# LOGIN COM VERIFICAÇÃO DO HASH
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
     email = data.get("email")
     senha = data.get("senha")
-    
+
     if not email or not senha:
         return jsonify({"success": False, "message": "E-mail e senha são obrigatórios."}), 400
 
-    # Verifica se o e-mail e a senha existem no Supabase
-    result = supabase.table("usuarios").select("*").eq("email", email).eq("senha", senha).execute()
+    result = supabase.table("usuarios").select("*").eq("email", email).execute()
     user = result.data[0] if result.data else None
 
-    if not user:
+    if not user or not check_password_hash(user["senha"], senha):
         return jsonify({"success": False, "message": "E-mail ou senha inválidos."}), 401
 
-    # Gerar o token JWT
     token = create_token(email)
 
     return jsonify({
@@ -88,7 +87,7 @@ def login():
         "email": user["email"],
         "nome": user.get("nome", ""),
         "modulos": user.get("modulos", []),
-        "token": token  # Retorna o token no login
+        "token": token
     })
 
 # Webhook para liberação de módulo
@@ -96,14 +95,11 @@ def login():
 def webhook_envio(modulo_id):
     data = request.get_json()
     email = data.get("email")
-    
+
     if not email:
         return jsonify({"success": False, "message": "E-mail é obrigatório."}), 400
 
-    # Mapeia o ID do módulo para o que o front espera
-    modulo_real = modulo_front_ids.get(modulo_id, modulo_id)
-
-    link_login = "cyberflux.onrender.com"
+    link_login = "https://cyberflux.onrender.com"
     corpo = f'''
     <h2>Seu acesso ao módulo foi liberado!</h2>
     <p><strong>Módulo:</strong> {modulo_id}</p>
@@ -112,6 +108,7 @@ def webhook_envio(modulo_id):
         Entrar na Plataforma
     </a>
     '''
+
     try:
         yag = yagmail.SMTP(EMAIL_REMETENTE, EMAIL_SENHA_APP)
         yag.send(to=email, subject="Acesso Liberado - CYBER.DIGITAL", contents=corpo)
@@ -122,22 +119,21 @@ def webhook_envio(modulo_id):
     user = result.data[0] if result.data else None
 
     if user:
-        # Se o registro já existe, apenas atualiza a lista de módulos
         modulos = user.get("modulos", [])
-        if modulo_real not in modulos:
-            modulos.append(modulo_real)
+        if modulo_id not in modulos:
+            modulos.append(modulo_id)
         supabase.table("usuarios").update({"modulos": modulos}).eq("email", email).execute()
     else:
-        # Se o usuário não existir, cria o registro com senha gerada de 6 dígitos
         senha_gerada = gerar_senha_6_digitos()
+        senha_hash = generate_password_hash(senha_gerada)
         supabase.table("usuarios").insert({
-            "nome": "Usuário",  # Nome padrão, a ser atualizado no registro
+            "nome": "Usuário",
             "email": email,
-            "senha": senha_gerada,
-            "modulos": [modulo_real],
+            "senha": senha_hash,
+            "modulos": [modulo_id],
             "pagamento_confirmado": True
         }).execute()
-        # Envia a senha gerada por e-mail
+
         corpo_senha = f'''
         <h2>Bem vindo(a)!</h2>
         <p>Sua conta foi criada automaticamente após a compra.</p>
@@ -151,16 +147,15 @@ def webhook_envio(modulo_id):
 
     return jsonify({"success": True, "message": f"Acesso ao módulo {modulo_id} enviado para {email}."})
 
-# Endpoint protegido para consulta dos dados do usuário (para o dashboard)
+# Rota protegida com JWT
 @app.route("/dados_usuario", methods=["GET"])
 def dados_usuario():
     token = request.headers.get('Authorization')
-    
+
     if not token:
         return jsonify({"success": False, "message": "Token de autenticação é obrigatório."}), 401
 
     email = verify_token(token)
-    
     if not email:
         return jsonify({"success": False, "message": "Token inválido ou expirado."}), 401
 
